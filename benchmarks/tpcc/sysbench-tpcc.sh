@@ -56,10 +56,15 @@ SysbenchDBName="sbtest"                     # Name of the MySQL Database to crea
 SYSBENCH_OPTS_TEMPLATE="--db-driver=mysql --mysql-db=${SysbenchDBName} --mysql-user=${SYSBENCH_USER} --mysql-password=${SYSBENCH_USER_PASSWORD} --mysql-host=mysqlINSTANCE --mysql-port=3306 --time=RUNTIME  --threads=THREADS --tables=TABLES --scale=SCALE"
 SYSBENCH_THREADS=1                          # Number of Sysbench workload generator threads. Use -W to override
 
+# === MemVerge Memory Machine Variables ===
+
+MVMM_CMD=""                     # Full path to the 'mm' binary
+MVMM_OPTS=""                    # Options for MemVerge Memory Machine
+
 # === Misc Variables ===
 
-OPT_FUNCS_BEFORE=""                   # Optional functions that get called before the bechmarks start in the main loop
-OPT_FUNCS_AFTER=""                    # Optional functions that get called after the bechmarks complete in the main loop
+OPT_FUNCS_BEFORE=""             # Optional functions that get called before the bechmarks start in the main loop
+OPT_FUNCS_AFTER=""              # Optional functions that get called after the bechmarks complete in the main loop
 
 #################################################################################################
 # Functions
@@ -391,7 +396,7 @@ function start_mysql_containers()
         # Start the MySQL container on specific NUMA node if it's not already running
         if ! podman ps --format "{{.Names}}" | grep -q mysql${i} &> /dev/null; then
             info_msg "Starting MySQL container 'mysql${i}'..."
-            if numactl ${NUMACTL_OPTION} podman start mysql${i} > /dev/null 2> ${OUTPUT_PATH}/podman_start_mysql${i}.err
+            if numactl ${NUMACTL_OPTION} ${MVMM_CMD} podman start mysql${i} > /dev/null 2> ${OUTPUT_PATH}/podman_start_mysql${i}.err
             then
                 info_msg "Container 'mysql${i}' started successfully."
             else
@@ -1274,6 +1279,8 @@ function disable_kernel_tpp() {
 # The user can explicityly use TPP with (-e kerneltpp)
 # Kernel TPP should be disabled for all other tests
 function kernel_tpp_feature() {
+    local err_state=false
+
     # Linux Kernel Transparent Page Placement (aka Tiering)
     # Debug statements
     if [[ ("$MEM_ENVIRONMENT" == "kerneltpp" || "$MEM_ENVIRONMENT" == "tpp") ]]
@@ -1284,7 +1291,7 @@ function kernel_tpp_feature() {
             error_msg "Please enable Linux Kernel Transparent Page Placement (TPP), then re-run this test. As root, run:"
             info_msg " $ sudo echo 2 > /proc/sys/kernel/numa_balancing"
             info_msg " $ sudo echo 1 > /sys/kernel/mm/numa/demotion_enabled"
-            exit 1
+            err_state=true
         elif [[ $(is_kernel_tpp_enabled) -eq 0 ]] && [[ $EUID -eq 0 ]]; # User is root
         then
             enable_kernel_tpp
@@ -1295,6 +1302,7 @@ function kernel_tpp_feature() {
             error_msg "An unknown memory environment setup has been detected that cannot be handled"
             error_msg "is_kernel_tpp_enabled returned '$(is_kernel_tpp_enabled)'"
             error_msg "EUID: $EUID"
+            err_state=true
         fi
     else # TPP should be disabled for all other memory test environments
         if [[ $(is_kernel_tpp_enabled) -eq 1 ]] && [[ $EUID -ne 0 ]]; # User is not root
@@ -1302,6 +1310,7 @@ function kernel_tpp_feature() {
             error_msg "Kernel Transparent Page Placement (TPP) is Enabled. Please disable it"
             info_msg " $ sudo echo 1 > /proc/sys/kernel/numa_balancing"
             info_msg " $ sudo echo 0 > /sys/kernel/mm/numa/demotion_enabled"
+            err_state=true
         elif [[ $(is_kernel_tpp_enabled) -eq 1 ]] && [[ $EUID -eq 0 ]]; # User is root
         then
             disable_kernel_tpp
@@ -1312,7 +1321,50 @@ function kernel_tpp_feature() {
             error_msg "An unknown memory environment setup has been detected that cannot be handled"
             error_msg "is_kernel_tpp_enabled returned '$(is_kernel_tpp_enabled)'"
             error_msg "EUID: $EUID"
+            err_state=true
         fi
+    fi
+
+    if ${err_state}; then
+        return 1
+    else
+        return 0
+    fi
+}
+
+# Use MemVerge Memory Machine (MVMM)
+# args: none
+# returns: nothing
+function use_memverge_memory_machine() {
+    local err_state=false
+    
+    if [[ "$MEM_ENVIRONMENT" == "mvmm" ]]
+    then
+        # Find the full path to the 'mm' binary
+        MVMM_CMD=($(command -v mm))
+
+        if [ ! -x "${MVMM_CMD}" ];
+        then
+            error_msg "'mm' command not found! Please install and configure MemVerge Memory Machine."
+            MVMM_CMD=""
+            err_state=true
+        else
+            # Test Memory Machine works
+            if ! ${MVMM_CMD} ls &> "${OUTPUT_PATH}/mvmm.err";
+            then
+                error_msg "Memory Machine returned an error. See '${OUTPUT_PATH}/mvmm.err' for more information."
+                err_state=true
+            else
+                info_msg "Using MemVerge Memory Machine"
+                MVMM_CMD="${MVMM_CMD} ${MVMM_OPTS}"
+            fi
+        fi
+    fi
+    
+    if ${err_state}; then
+        return 1
+    else
+        return 0
     fi
 }
 
@@ -1413,7 +1465,7 @@ then
     exit 1
 fi
 
-if [[ ("$MEM_ENVIRONMENT" != "numapreferred" && "$MEM_ENVIRONMENT" != "numainterleave" && "$MEM_ENVIRONMENT" != "mm" && "$MEM_ENVIRONMENT" != "dram" && "$MEM_ENVIRONMENT" != "cxl" && "$MEM_ENVIRONMENT" != "kerneltpp" && "$MEM_ENVIRONMENT" != "tpp") ]];
+if [[ ("$MEM_ENVIRONMENT" != "numapreferred" && "$MEM_ENVIRONMENT" != "numainterleave" && "$MEM_ENVIRONMENT" != "mm" && "$MEM_ENVIRONMENT" != "dram" && "$MEM_ENVIRONMENT" != "cxl" && "$MEM_ENVIRONMENT" != "kerneltpp" && "$MEM_ENVIRONMENT" != "tpp" && "$MEM_ENVIRONMENT" != "mvmm") ]];
 then
     error_msg "Unknown memory environment '${MEM_ENVIRONMENT}'"
     print_usage
@@ -1482,23 +1534,7 @@ log_stdout_stderr "${OUTPUT_PATH}"
 display_start_info "$*"
 
 # Define the array of functions to call in the correct order
-# functions=("check_selinux_enforce" "check_mysql_data_dir" "check_cgroups" "create_network" "set_numactl_options" "${OPT_FUNCS_BEFORE}" "create_sysbench_container_image" "start_sysbench_containers" "check_my_cnf_dir_exists" "start_mysql_containers" "pause_for_stability" "create_mysql_databases" "prepare_the_database" "get_mysql_config" "warm_the_database" "run_the_benchmark" "cleanup_database" "get_container_logs" "stop_containers" "remove_containers" "${OPT_FUNCS_AFTER}")
-
-# Define the array of functions to call in the correct order
-functions=("check_selinux_enforce" "check_mysql_data_dir" "check_cgroups" "create_network" "set_numactl_options" "kernel_tpp_feature")
-
-# Add functions from OPT_FUNCS_BEFORE if it is set
-if [ -n "$OPT_FUNCS_BEFORE" ]; then
-    functions+=("$OPT_FUNCS_BEFORE")
-fi
-
-# Add remaining functions
-functions+=("create_sysbench_container_image" "start_sysbench_containers" "check_my_cnf_dir_exists" "start_mysql_containers" "pause_for_stability" "create_mysql_databases" "prepare_the_database" "get_mysql_config" "warm_the_database" "run_the_benchmark" "cleanup_database" "get_container_logs" "stop_containers" "remove_containers" "process_tpcc_results_to_csv")
-
-# Add functions from OPT_FUNCS_AFTER if it is set
-if [ -n "$OPT_FUNCS_AFTER" ]; then
-    functions+=("$OPT_FUNCS_AFTER")
-fi
+functions=("check_selinux_enforce" "check_mysql_data_dir" "check_cgroups" "create_network" "set_numactl_options" "kernel_tpp_feature" "use_memverge_memory_machine" "create_sysbench_container_image" "start_sysbench_containers" "check_my_cnf_dir_exists" "start_mysql_containers" "pause_for_stability" "create_mysql_databases" "prepare_the_database" "get_mysql_config" "warm_the_database" "run_the_benchmark" "cleanup_database" "get_container_logs" "stop_containers" "remove_containers" "process_tpcc_results_to_csv")
 
 # Iterate over the array of functions and call them one by one
 # Handle the return value: 0=Success, 1=Failure
