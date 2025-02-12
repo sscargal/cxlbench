@@ -1,3 +1,5 @@
+# As of February 11, 2025, this benchmark suite has been shifted to https://github.com/opencomputeproject/OCP-SVR-CMS-Benchmarks.git.  This repository will be considered as archived and read-only.
+
 # CXL Benchmark Suite
 
 ## Overview
