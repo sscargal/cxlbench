@@ -4,3 +4,6 @@
 [submodule "benchmarks/GPU/NVidia/nvbandwidth"]
 	path = benchmarks/GPU/NVidia/nvbandwidth
 	url = https://github.com/NVIDIA/nvbandwidth
+[submodule "benchmarks/GPU/AMD/rocm_bandwidth_test"]
+	path = benchmarks/GPU/AMD/rocm_bandwidth_test
+	url = https://github.com/ROCm/rocm_bandwidth_test
